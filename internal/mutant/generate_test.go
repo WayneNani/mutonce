@@ -14,7 +14,7 @@ func generateExample(t *testing.T, pattern string) *Result {
 		t.Fatal(err)
 	}
 	ops, _ := ParseOps("all")
-	res, err := Generate(dir, []string{pattern}, ops, nil, t.Logf)
+	res, err := Generate(dir, []string{pattern}, Options{Ops: ops, MCDC: true}, t.Logf)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}

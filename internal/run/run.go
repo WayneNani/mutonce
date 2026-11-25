@@ -6,6 +6,7 @@ package run
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -45,6 +46,7 @@ type Config struct {
 	Recheck       bool     // run every mutant twice and flag changing verdicts
 	NoSandbox     bool     // run tests in the module itself instead of copies
 	Reorder       bool     // run the last killer of a function first; no gain measured so far
+	MCDC          bool     // also measure MC/DC coverage of the mutated packages
 	Keep          bool
 	Log           io.Writer
 }
@@ -80,24 +82,26 @@ type Phase struct {
 
 // Report summarises a run.
 type Report struct {
-	Mode             string          `json:"mode"`
-	Dir              string          `json:"dir"`
-	Outcomes         []Outcome       `json:"outcomes"`
-	Excluded         []mutant.Mutant `json:"excluded"`
-	Rounds           int             `json:"rounds"`
-	Binaries         int             `json:"binaries"`
-	Tests            int             `json:"tests"`
-	Covered          int             `json:"covered"`
-	Executed         int             `json:"executed"`
-	Phases           []Phase         `json:"phases"`
-	BaselineFailures []string        `json:"baselineFailures,omitempty"`
-	MemBudget        int64           `json:"memBudget"`
-	Diff             string          `json:"diff,omitempty"`
-	DiffFiles        int             `json:"diffFiles,omitempty"`
-	DiffLines        int             `json:"diffLines,omitempty"`
-	Unselected       int             `json:"unselected,omitempty"`
-	SideEffects      []string        `json:"sideEffects,omitempty"` // files test runs left behind (removed again)
-	WorkDir          string          `json:"workDir,omitempty"`
+	Mode             string                  `json:"mode"`
+	Dir              string                  `json:"dir"`
+	Outcomes         []Outcome               `json:"outcomes"`
+	Excluded         []mutant.Mutant         `json:"excluded"`
+	Rounds           int                     `json:"rounds"`
+	Binaries         int                     `json:"binaries"`
+	Tests            int                     `json:"tests"`
+	Covered          int                     `json:"covered"`
+	Executed         int                     `json:"executed"`
+	Phases           []Phase                 `json:"phases"`
+	BaselineFailures []string                `json:"baselineFailures,omitempty"`
+	MemBudget        int64                   `json:"memBudget"`
+	Diff             string                  `json:"diff,omitempty"`
+	DiffFiles        int                     `json:"diffFiles,omitempty"`
+	DiffLines        int                     `json:"diffLines,omitempty"`
+	Unselected       int                     `json:"unselected,omitempty"`
+	SideEffects      []string                `json:"sideEffects,omitempty"` // files test runs left behind (removed again)
+	MCDC             []mutant.DecisionResult `json:"mcdc,omitempty"`
+	MCDCExcluded     int                     `json:"mcdcExcluded,omitempty"` // decisions whose probes did not compile
+	WorkDir          string                  `json:"workDir,omitempty"`
 }
 
 type binary struct {
@@ -180,14 +184,18 @@ func Run(cfg Config) (*Report, error) {
 		rep.Diff, rep.DiffFiles, rep.DiffLines = cfg.Diff, len(changes), changes.Lines()
 		inDiff = changes.Touches
 	}
-	res, err := mutant.Generate(cfg.Dir, cfg.Patterns, cfg.Ops, inDiff, logf)
+	res, err := mutant.Generate(cfg.Dir, cfg.Patterns, mutant.Options{Ops: cfg.Ops, MCDC: cfg.MCDC, Selected: inDiff}, logf)
 	if err != nil {
 		return nil, err
 	}
 	phase("Schema + type check", t)
 	rep.Excluded, rep.Rounds, rep.Unselected = res.Excluded, res.Rounds, res.Unselected
+	rep.MCDCExcluded = res.ExcludedDecisions
 	logf("%d mutants in the schema, %d dropped", len(res.Mutants), len(res.Excluded))
-	if len(res.Mutants) == 0 {
+	if cfg.MCDC {
+		logf("%d decisions instrumented for MC/DC, %d dropped", len(res.Decisions), res.ExcludedDecisions)
+	}
+	if len(res.Mutants) == 0 && len(res.Decisions) == 0 {
 		rep.Phases = append(rep.Phases, Phase{"Total", time.Since(start)})
 		return rep, nil
 	}
@@ -241,12 +249,19 @@ func Run(cfg Config) (*Report, error) {
 	logf("%d test binaries built", len(bins))
 
 	t = time.Now()
-	cov, tests, failures, err := r.record(bins)
+	cov, vecs, tests, failures, err := r.record(bins)
 	if err != nil {
 		return nil, err
 	}
 	phase("Record per-test coverage", t)
 	rep.Tests, rep.BaselineFailures = tests, failures
+	for _, d := range res.Decisions {
+		rep.MCDC = append(rep.MCDC, mutant.Analyze(d, vecs[d.ID]))
+	}
+	if len(res.Mutants) == 0 {
+		rep.Phases = append(rep.Phases, Phase{"Total", time.Since(start)})
+		return rep, nil
+	}
 
 	var covered []mutant.Mutant
 	for _, m := range res.Mutants {
@@ -356,8 +371,9 @@ func (r *runner) goTestC(overlay, out, pkgPath string) error {
 
 // record runs every test once on its own with recording enabled. That costs
 // one run per test, not per test and mutant, and yields the per-test
-// coverage that `go test -cover` cannot provide.
-func (r *runner) record(bins []*binary) (map[int][]testRef, int, []string, error) {
+// coverage that `go test -cover` cannot provide, plus the MC/DC vectors of
+// all passing tests.
+func (r *runner) record(bins []*binary) (map[int][]testRef, map[int][]mutant.Vector, int, []string, error) {
 	type job struct {
 		bin  *binary
 		name string
@@ -367,17 +383,18 @@ func (r *runner) record(bins []*binary) (map[int][]testRef, int, []string, error
 	for _, b := range bins {
 		names, err := listTests(b)
 		if err != nil {
-			return nil, 0, nil, err
+			return nil, nil, 0, nil, err
 		}
 		for _, n := range names {
 			jobs = append(jobs, job{b, n, filepath.Join(r.work, "rec", fmt.Sprintf("%03d-%05d", b.idx, len(jobs)))})
 		}
 	}
 	if err := os.MkdirAll(filepath.Join(r.work, "rec"), 0o755); err != nil {
-		return nil, 0, nil, err
+		return nil, nil, 0, nil, err
 	}
 
 	cov := map[int][]testRef{}
+	vecSet := map[int]map[mutant.Vector]bool{}
 	var failures []string
 	var mu sync.Mutex
 	var g errgroup.Group
@@ -386,7 +403,7 @@ func (r *runner) record(bins []*binary) (map[int][]testRef, int, []string, error
 	for _, j := range jobs {
 		g.Go(func() error {
 			run := r.runLimited(j.bin, []string{j.name}, []string{"MUTONCE_RECORD=" + j.file}, 10*time.Minute, limit)
-			ids, err := readIDs(j.file)
+			rec, err := readRecord(j.file)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -396,14 +413,31 @@ func (r *runner) record(bins []*binary) (map[int][]testRef, int, []string, error
 				failures = append(failures, j.bin.pkg.Path+"."+j.name)
 				return nil // a failing test cannot kill anything
 			}
-			for _, id := range ids {
+			for _, id := range rec.ids {
 				cov[id] = append(cov[id], testRef{j.bin, j.name, run.dur, run.maxRSS})
+			}
+			for d, vs := range rec.vectors {
+				if vecSet[d] == nil {
+					vecSet[d] = map[mutant.Vector]bool{}
+				}
+				for _, v := range vs {
+					vecSet[d][v] = true
+				}
 			}
 			return nil
 		})
 	}
 	if err := g.Wait(); err != nil {
-		return nil, 0, nil, err
+		return nil, nil, 0, nil, err
+	}
+	vecs := map[int][]mutant.Vector{}
+	for d, set := range vecSet {
+		vs := slices.Collect(maps.Keys(set))
+		// Map order is random; a stable order keeps suggestions stable.
+		slices.SortFunc(vs, func(a, b mutant.Vector) int {
+			return cmp.Or(cmp.Compare(a.Eval, b.Eval), cmp.Compare(a.Val, b.Val), cmpBool(a.Out, b.Out))
+		})
+		vecs[d] = vs
 	}
 	for _, refs := range cov {
 		sort.Slice(refs, func(i, k int) bool {
@@ -414,7 +448,17 @@ func (r *runner) record(bins []*binary) (map[int][]testRef, int, []string, error
 		})
 	}
 	sort.Strings(failures)
-	return cov, len(jobs), failures, nil
+	return cov, vecs, len(jobs), failures, nil
+}
+
+func cmpBool(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case a:
+		return 1
+	}
+	return -1
 }
 
 var testName = regexp.MustCompile(`^(Test|Example|Fuzz)\w*$`)
@@ -436,23 +480,41 @@ func listTests(b *binary) ([]string, error) {
 	return names, nil
 }
 
-func readIDs(path string) ([]int, error) {
+// record is what one test run wrote to MUTONCE_RECORD: the mutation points
+// it reached, one ID per line, and the MC/DC vectors as "d <id> <vector>
+// <outcome>".
+type record struct {
+	ids     []int
+	vectors map[int][]mutant.Vector
+}
+
+func readRecord(path string) (record, error) {
+	rec := record{vectors: map[int][]mutant.Vector{}}
 	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return rec, nil
 	}
 	if err != nil {
-		return nil, err
+		return rec, err
 	}
 	defer f.Close()
-	var ids []int
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
-		if id, err := strconv.Atoi(sc.Text()); err == nil {
-			ids = append(ids, id)
+		line := sc.Text()
+		if f := strings.Fields(line); len(f) == 4 && f[0] == "d" {
+			d, err1 := strconv.Atoi(f[1])
+			v, err2 := strconv.ParseUint(f[2], 10, 64)
+			out, err3 := strconv.ParseBool(f[3])
+			if err1 == nil && err2 == nil && err3 == nil {
+				rec.vectors[d] = append(rec.vectors[d], mutant.ParseVector(v, out))
+			}
+			continue
+		}
+		if id, err := strconv.Atoi(line); err == nil {
+			rec.ids = append(rec.ids, id)
 		}
 	}
-	return ids, sc.Err()
+	return rec, sc.Err()
 }
 
 // sample picks n evenly spaced mutants so that schema and naive mode run the

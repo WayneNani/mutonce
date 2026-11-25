@@ -86,4 +86,55 @@ func _moOff(base, n int) bool {
 	}
 	return _moActive < base || _moActive >= base+n
 }
+
+// _moC notes the value of condition k in the vector of its decision: bit k
+// marks it as evaluated, bit 32+k holds its value.
+func _moC(v *uint64, k uint, c bool) bool {
+	*v |= 1 << k
+	if c {
+		*v |= 1 << (32 + k)
+	}
+	return c
+}
+
+// _moD records the vector and outcome of decision d for MC/DC.
+func _moD(d int, r bool, v *uint64) bool {
+	if _moRecPath != "" {
+		_moRecordVec(d, *v, r)
+	}
+	return r
+}
+
+type _moVec struct {
+	d int
+	v uint64
+	r bool
+}
+
+var _moVecs = map[_moVec]bool{}
+
+// _moRecordVec appends every vector seen for the first time to the file
+// named by MUTONCE_RECORD as "d <decision> <vector> <outcome>".
+func _moRecordVec(d int, v uint64, r bool) {
+	_moMu.Lock()
+	defer _moMu.Unlock()
+	key := _moVec{d, v, r}
+	if _moVecs[key] {
+		return
+	}
+	_moVecs[key] = true
+	buf := []byte("d ")
+	buf = _mostrconv.AppendInt(buf, int64(d), 10)
+	buf = append(buf, ' ')
+	buf = _mostrconv.AppendUint(buf, v, 10)
+	buf = append(buf, ' ')
+	buf = _mostrconv.AppendBool(buf, r)
+	buf = append(buf, '\n')
+	f, err := _moos.OpenFile(_moRecPath, _moos.O_APPEND|_moos.O_CREATE|_moos.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	f.Write(buf)
+	f.Close()
+}
 `

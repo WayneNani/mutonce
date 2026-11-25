@@ -20,7 +20,8 @@ import (
 func main() {
 	dir := flag.String("C", ".", "directory of the Go module to test")
 	mode := flag.String("mode", "schema", "schema, or naive (for comparison: one build per mutant)")
-	ops := flag.String("ops", "all", "operators, comma-separated: ROR,LCR,AOR,SBR,RET,ERR,SEL")
+	ops := flag.String("ops", "all", "operators, comma-separated: ROR,LCR,AOR,SBR,RET,ERR,SEL; none for MC/DC alone")
+	mcdc := flag.Bool("mcdc", false, "also measure MC/DC coverage of the mutated packages")
 	workers := flag.Int("j", runtime.NumCPU(), "parallel test processes")
 	factor := flag.Float64("timeout-factor", 5, "timeout = factor × runtime of the tests without mutation + 2s")
 	recheck := flag.Bool("recheck", false, "run every mutant twice and mark changing verdicts as flaky")
@@ -46,6 +47,9 @@ func main() {
 	opSet, err := mutant.ParseOps(*ops)
 	if err != nil {
 		fail(err)
+	}
+	if len(opSet) == 0 && !*mcdc {
+		fail(fmt.Errorf("-ops none leaves nothing to do without -mcdc"))
 	}
 	budget, err := parseSize(*memBudget)
 	if err != nil {
@@ -73,6 +77,7 @@ func main() {
 		TestPatterns:  splitList(*tests),
 		Recheck:       *recheck,
 		Reorder:       *reorder,
+		MCDC:          *mcdc,
 		NoSandbox:     !*sandbox,
 		Keep:          *keep,
 	}

@@ -28,9 +28,12 @@ func (rep *Report) Print(w io.Writer, verbose bool) {
 		fmt.Fprintf(w, "Diff:      %d changed line(s) in %d file(s) since %s, %d mutants outside skipped\n",
 			rep.DiffLines, rep.DiffFiles, rep.Diff, rep.Unselected)
 	}
-	fmt.Fprintf(w, "Mutants:   %d in the schema, %d dropped by the type check (%d round(s))\n",
-		len(rep.Outcomes)+rep.Covered-rep.Executed, len(rep.Excluded), rep.Rounds)
-	if len(rep.Outcomes) == 0 {
+	mutation := len(rep.Outcomes)+len(rep.Excluded) > 0 || rep.MCDC == nil
+	if mutation {
+		fmt.Fprintf(w, "Mutants:   %d in the schema, %d dropped by the type check (%d round(s))\n",
+			len(rep.Outcomes)+rep.Covered-rep.Executed, len(rep.Excluded), rep.Rounds)
+	}
+	if len(rep.Outcomes) == 0 && rep.MCDC == nil {
 		fmt.Fprintln(w, "\nNo mutants to check.")
 		return
 	}
@@ -52,15 +55,18 @@ func (rep *Report) Print(w io.Writer, verbose bool) {
 		fmt.Fprintln(w)
 	}
 
-	rep.printTable(w)
-	rep.printSurvivors(w, verbose)
-	if verbose {
-		rep.list(w, "Uncovered mutants", NotCovered)
-		rep.list(w, "Timeouts", Timeout)
-		rep.list(w, "Memory limit exceeded", Memory)
+	if len(rep.Outcomes) > 0 {
+		rep.printTable(w)
+		rep.printSurvivors(w, verbose)
+		if verbose {
+			rep.list(w, "Uncovered mutants", NotCovered)
+			rep.list(w, "Timeouts", Timeout)
+			rep.list(w, "Memory limit exceeded", Memory)
+		}
+		rep.list(w, "Flaky: verdict changes when run again", Flaky)
+		rep.list(w, "Errors", Error)
 	}
-	rep.list(w, "Flaky: verdict changes when run again", Flaky)
-	rep.list(w, "Errors", Error)
+	rep.printMCDC(w, verbose)
 
 	fmt.Fprintln(w, "\nTimings:")
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)

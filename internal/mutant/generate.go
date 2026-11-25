@@ -29,10 +29,23 @@ type PkgInfo struct {
 	HasTests bool
 }
 
+// Options select what Generate builds into the schema.
+type Options struct {
+	Ops  map[Op]bool
+	MCDC bool // instrument decisions for MC/DC coverage
+	// Selected, if not nil, picks the mutants and decisions to build in
+	// (diff mode); IDs stay the same either way.
+	Selected func(Mutant) bool
+}
+
 // Result is a type-correct mutant schema.
 type Result struct {
 	Mutants  []Mutant
 	Excluded []Mutant // dropped because the schema would not compile
+	// Decisions are instrumented for MC/DC; ExcludedDecisions counts those
+	// whose probes would not compile.
+	Decisions         []Decision
+	ExcludedDecisions int
 	// Unselected counts the mutants left out by the selection (diff mode).
 	Unselected int
 	Overlay    map[string][]byte
@@ -49,16 +62,15 @@ const loadMode = packages.NeedName | packages.NeedFiles | packages.NeedCompiledG
 // Generate builds the schema for the packages matched by patterns in dir.
 // Mutants whose code does not type-check are dropped and the schema is
 // regenerated until it compiles, since one bad mutant would break the build
-// of all others. If selected is not nil, only the mutants it accepts are
-// compiled in; IDs stay the same either way.
-func Generate(dir string, patterns []string, ops map[Op]bool, selected func(Mutant) bool, logf func(string, ...any)) (*Result, error) {
-	excluded := map[int]bool{}
+// of all others.
+func Generate(dir string, patterns []string, opts Options, logf func(string, ...any)) (*Result, error) {
+	excluded, excludedDec := map[int]bool{}, map[int]bool{}
 	for round := 1; round <= maxRounds; round++ {
 		pkgs, err := load(dir, patterns)
 		if err != nil {
 			return nil, err
 		}
-		res, errs, err := generate(pkgs, ops, selected, excluded)
+		res, errs, err := generate(pkgs, opts, excluded, excludedDec)
 		if err != nil {
 			return nil, err
 		}
@@ -66,21 +78,23 @@ func Generate(dir string, patterns []string, ops map[Op]bool, selected func(Muta
 		if len(errs) == 0 {
 			return res, nil
 		}
-		bad, err := attribute(errs, res.Overlay)
+		bad, badDec, err := attribute(errs, res.Overlay)
 		if err != nil {
 			return nil, err
 		}
 		progress := false
 		for id := range bad {
-			if !excluded[id] {
-				excluded[id] = true
-				progress = true
-			}
+			progress = progress || !excluded[id]
+			excluded[id] = true
+		}
+		for id := range badDec {
+			progress = progress || !excludedDec[id]
+			excludedDec[id] = true
 		}
 		if !progress {
 			return nil, fmt.Errorf("schema does not compile: %s: %s", errs[0].File, errs[0].Msg)
 		}
-		logf("round %d: %d type errors, %d mutants dropped", round, len(errs), len(bad))
+		logf("round %d: %d type errors, %d mutants and %d decisions dropped", round, len(errs), len(bad), len(badDec))
 	}
 	return nil, fmt.Errorf("schema still broken after %d rounds", maxRounds)
 }
@@ -95,13 +109,14 @@ func load(dir string, patterns []string) ([]*packages.Package, error) {
 	return pkgs, nil
 }
 
-func generate(pkgs []*packages.Package, ops map[Op]bool, selected func(Mutant) bool, excluded map[int]bool) (*Result, []typeError, error) {
+func generate(pkgs []*packages.Package, opts Options, excluded, excludedDec map[int]bool) (*Result, []typeError, error) {
 	res := &Result{Overlay: map[string][]byte{}, Runtime: map[string]string{}}
 	// drop holds the excluded mutants plus those not selected; neither is
-	// written into the schema.
-	drop := maps.Clone(excluded)
+	// written into the schema. dropDec does the same for decisions.
+	drop, dropDec := maps.Clone(excluded), maps.Clone(excludedDec)
+	selected := opts.Selected
 	var errs []typeError
-	next := 1
+	next, nextDec := 1, 1
 	for _, pkg := range pkgs {
 		if len(pkg.Errors) > 0 {
 			return nil, nil, fmt.Errorf("cannot load package %s: %v", pkg.PkgPath, pkg.Errors[0])
@@ -124,7 +139,7 @@ func generate(pkgs []*packages.Package, ops map[Op]bool, selected func(Mutant) b
 			if err != nil {
 				return nil, nil, err
 			}
-			g := newFileGen(pkg, file, src, ops, &next)
+			g := newFileGen(pkg, file, src, opts, &next, &nextDec)
 			g.collect()
 			for _, m := range g.mutants {
 				switch {
@@ -137,7 +152,17 @@ func generate(pkgs []*packages.Package, ops map[Op]bool, selected func(Mutant) b
 					res.Mutants = append(res.Mutants, m)
 				}
 			}
-			if !g.rewrite(drop) {
+			for _, d := range g.decisions {
+				switch {
+				case selected != nil && !selected(Mutant{File: d.File, Line: d.Line, EndLine: d.EndLine}):
+					dropDec[d.ID] = true
+				case excludedDec[d.ID]:
+					res.ExcludedDecisions++
+				default:
+					res.Decisions = append(res.Decisions, d)
+				}
+			}
+			if !g.rewrite(drop, dropDec) {
 				continue
 			}
 			file.Comments = directives(file.Comments)
@@ -265,27 +290,27 @@ type importerFunc func(path string) (*types.Package, error)
 func (f importerFunc) Import(path string) (*types.Package, error) { return f(path) }
 
 // attribute maps type errors in the generated files back to the mutants
-// that caused them: the guards in the innermost node around the error.
-func attribute(errs []typeError, overlay map[string][]byte) (map[int]bool, error) {
-	bad := map[int]bool{}
+// and decisions that caused them: the guards and probes in the innermost
+// node around the error.
+func attribute(errs []typeError, overlay map[string][]byte) (bad, badDec map[int]bool, err error) {
+	bad, badDec = map[int]bool{}, map[int]bool{}
 	fset := token.NewFileSet()
 	parsed := map[string]*ast.File{}
 	for _, e := range errs {
 		src, ok := overlay[e.File]
 		if !ok {
-			return nil, fmt.Errorf("unexpected error outside the schema: %s: %s", e.File, e.Msg)
+			return nil, nil, fmt.Errorf("unexpected error outside the schema: %s: %s", e.File, e.Msg)
 		}
 		f := parsed[e.File]
 		if f == nil {
-			var err error
 			if f, err = parser.ParseFile(fset, e.File, src, parser.SkipObjectResolution); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			parsed[e.File] = f
 		}
 		pos := fset.File(f.Pos()).Pos(e.Offset)
 		path, _ := astutil.PathEnclosingInterval(f, pos, pos)
-		ids := map[int]bool{}
+		ids, decs := map[int]bool{}, map[int]bool{}
 		// go/types reports a missing return at the closing brace; the culprit
 		// is a removed statement at the end of the function.
 		if strings.Contains(e.Msg, "missing return") && len(path) > 0 {
@@ -294,19 +319,18 @@ func attribute(errs []typeError, overlay map[string][]byte) (map[int]bool, error
 			}
 		}
 		for _, n := range path {
-			if len(ids) > 0 {
+			if len(ids)+len(decs) > 0 {
 				break
 			}
-			collectGuards(n, ids)
+			collectGuards(n, ids, decs)
 		}
-		if len(ids) == 0 {
-			return nil, fmt.Errorf("type error not attributable to a mutant: %s: %s", e.File, e.Msg)
+		if len(ids)+len(decs) == 0 {
+			return nil, nil, fmt.Errorf("type error not attributable to a mutant: %s: %s", e.File, e.Msg)
 		}
-		for id := range ids {
-			bad[id] = true
-		}
+		maps.Copy(bad, ids)
+		maps.Copy(badDec, decs)
 	}
-	return bad, nil
+	return bad, badDec, nil
 }
 
 // terminalWrappers collects SBR wrappers that end a statement list, i.e.
@@ -368,11 +392,18 @@ func sbrWrapper(s ast.Stmt) (int, ast.Stmt, bool) {
 	return id, ifs.Body.List[0], true
 }
 
-func collectGuards(n ast.Node, ids map[int]bool) {
+func collectGuards(n ast.Node, ids, decs map[int]bool) {
 	ast.Inspect(n, func(n ast.Node) bool {
 		if id, cnt, ok := guardCall(n); ok {
 			for i := range cnt {
 				ids[id+i] = true
+			}
+		}
+		if call, ok := n.(*ast.CallExpr); ok && len(call.Args) == 3 {
+			if fn, ok := call.Fun.(*ast.Ident); ok && fn.Name == "_moD" {
+				if id, ok := intArg(call.Args[0]); ok {
+					decs[id] = true
+				}
 			}
 		}
 		return true

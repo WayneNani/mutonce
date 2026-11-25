@@ -32,9 +32,13 @@ const (
 	CatGuard = "guard"      // a guard clause that can be removed or weakened
 )
 
-// ParseOps parses a comma separated operator list; "" and "all" select all.
+// ParseOps parses a comma separated operator list; "" and "all" select all,
+// "none" selects none (for MC/DC coverage alone).
 func ParseOps(s string) (map[Op]bool, error) {
 	ops := map[Op]bool{}
+	if s == "none" {
+		return ops, nil
+	}
 	if s == "" || s == "all" {
 		for _, op := range AllOps {
 			ops[op] = true
@@ -48,7 +52,7 @@ func ParseOps(s string) (map[Op]bool, error) {
 			known = known || op == k
 		}
 		if !known {
-			return nil, fmt.Errorf("unknown operator %q (allowed: ROR, LCR, AOR, SBR, RET, ERR, SEL)", f)
+			return nil, fmt.Errorf("unknown operator %q (allowed: ROR, LCR, AOR, SBR, RET, ERR, SEL, all, none)", f)
 		}
 		ops[op] = true
 	}

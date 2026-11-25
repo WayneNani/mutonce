@@ -14,6 +14,11 @@ test binary is built once; a mutant then only costs starting that binary with
 an environment variable, and only the tests that actually reach the mutated
 code run.
 
+With `-mcdc`, the same run also measures **MC/DC coverage** (modified
+condition/decision coverage): for every condition in an `&&`/`||` expression,
+whether some test shows that it changes the outcome on its own. Where none
+does, the report names the missing test case.
+
 > **Status:** early prototype. It works on real-world modules (see
 > [Results](#results)), but the command line and report format may still change.
 
@@ -36,6 +41,8 @@ mutonce                       # mutate ./... and run the tests
 mutonce -diff main            # only code changed since main (for pull requests)
 mutonce -tests ./... ./internal/server   # mutate one package, use all tests
 mutonce -json report.json -v  # full details
+mutonce -mcdc                 # mutation testing plus MC/DC coverage
+mutonce -mcdc -ops none       # MC/DC coverage only, in seconds
 ```
 
 A shortened report for the [example module](example) in this repository:
@@ -65,7 +72,8 @@ Bypassable checks (14 in 5 function(s))
 |---|---|
 | `-diff <ref>` | only mutate code touching lines changed since a git ref, including uncommitted and untracked files |
 | `-tests <patterns>` | packages whose tests run, independent of the mutated packages (default: the mutated packages) |
-| `-ops ROR,LCR,AOR,SBR,RET,ERR,SEL` | operators to use (default: all) |
+| `-ops ROR,LCR,AOR,SBR,RET,ERR,SEL` | operators to use (default: all); `none` together with `-mcdc` measures MC/DC only |
+| `-mcdc` | also measure MC/DC coverage of the mutated packages (see [MC/DC coverage](#mcdc-coverage)) |
 | `-recheck` | run every mutant twice; changing verdicts are reported as flaky and excluded from the score |
 | `-j N` | parallel test processes (default: number of CPUs) |
 | `-timeout-factor F` | timeout = F × runtime of the tests without mutation + 2 s (default 5) |
@@ -188,6 +196,55 @@ Not mutated:
 
 UOI and ABS are left out (rarely productive according to Google).
 
+## MC/DC coverage
+
+MC/DC is the coverage criterion of avionics (DO-178C level A) and automotive
+safety standards (ISO 26262). A *decision* is a boolean expression with at
+least two *conditions* joined by `&&` or `||`; a condition is an operand that
+contains no `&&`, `||` or `!` itself. MC/DC asks for every condition to be shown
+to affect the outcome on its own: two evaluations in which only that condition
+changes, and the outcome changes with it.
+
+```text
+MC/DC: 4 of 6 conditions (66.7 %) in 3 decisions
+
+Conditions without a shown independent effect (1 decision(s))
+  No pair of test runs changes only this condition and with it the outcome.
+  pricing/pricing.go:53  FreeShipping  premium || total > 2500
+    premium       both values seen  missing: premium = false, total > 2500 = false → false
+    total > 2500  only true seen    missing: premium = false, total > 2500 = false → false
+```
+
+Here the tests only ever ask for free shipping; a single test with a small,
+non-premium order would cover both conditions.
+
+**How it is measured.** The decisions are instrumented in the same schema as
+the mutants, and the vectors are recorded in the per-test coverage run that
+happens anyway, so `-mcdc -ops none` costs one build and one run of each test.
+Every condition is wrapped in a probe that notes its value, and the decision
+in a closure holding the vector of one evaluation:
+
+```go
+// premium || total > 2500
+func() bool {
+	var _mov uint64
+	return _moD(1, (_moC(&_mov, 0, premium) || _moC(&_mov, 1, total > 2500)), &_mov)
+}()
+```
+
+A vector per evaluation keeps recursion and goroutines apart. Go evaluates
+`&&` and `||` with short circuit, so a condition that was not evaluated matches
+either value when looking for a pair ("unique cause with short circuit", as in
+the MC/DC modes of GCC and LLVM). Only passing tests count. Constant operands
+(`debug && …`) are not conditions; decisions of a named boolean type and those
+calling `recover` are left out, because a closure would change their meaning.
+
+**MC/DC or mutation score?** They overlap: the ROR and LCR mutants of a
+decision can only be killed by tests that separate its conditions, so a good
+mutation score usually implies most of MC/DC. Mutation testing is the stricter
+measure, because a test must also *check* the result, not just cause it. MC/DC
+is cheaper, needs no test to fail, and is what a certification asks for.
+
 ## Results
 
 AMD Ryzen 7 5800X (8 cores / 16 threads), `-j 16`. "Naive" means one
@@ -209,6 +266,11 @@ not a schema bug: `TestSort` shuffles its input with `rand.Shuffle` and checks
 the result with `sort.IsSorted` — that is, with the same mutated `Less`. The
 mutant is killed in about half of the runs, which also shows that mutation
 analysis exposes weak test oracles.
+
+With `-mcdc`, all 1,679 decisions of `golang.org/x/tools` (every package)
+passed the type check and the compiler without a single one being dropped.
+For `astutil`, MC/DC came to 39 of 62 conditions (62.9 %); the mutation
+verdicts were identical with and without it.
 
 ### A real-world module
 
@@ -273,6 +335,11 @@ What the runs found, and what the tests written in response showed:
   measure it.
 - **cgo packages** and generated files are skipped; function literals get no
   RET mutants.
+- **MC/DC** covers boolean expressions of the mutated, non-generated files only.
+  Decisions with more than 32 conditions are skipped; for more than 12, no
+  missing test case is proposed. Like the switches, the probe closures cost a
+  little speed (about 0.3 ms per mutant on `astutil`), so `-mcdc` is off by
+  default.
 - **Equivalent mutants** remain apart from the simple cases above. They are
   the real remaining problem — run time is not anymore.
 
@@ -299,12 +366,17 @@ and measuring how productive ERR and SEL are compared to the classic operators.
   Detect Pseudo-Tested Methods*, ASE 2018.
 - T. Tu, X. Liu, L. Song, Y. Zhang: *Understanding Real-World Concurrency Bugs
   in Go*, ASPLOS 2019.
+- J. J. Chilenski, S. P. Miller: *Applicability of Modified Condition/Decision
+  Coverage to Software Testing*, Software Engineering Journal 1994.
+- J. J. Chilenski: *An Investigation of Three Forms of the Modified Condition
+  Decision Coverage (MCDC) Criterion*, FAA report DOT/FAA/AR-01/18, 2001.
 
 ## Project layout
 
 - [cmd/mutonce](cmd/mutonce): command line.
 - [internal/mutant](internal/mutant): operators, selection of mutation points,
-  AST rewriting, type-check filter, runtime helpers, diff selection.
+  AST rewriting, type-check filter, runtime helpers, diff selection, MC/DC
+  instrumentation and analysis ([mcdc.go](internal/mutant/mcdc.go)).
 - [internal/run](internal/run): builds, per-test coverage, execution,
   sandboxes, platform guards, naive comparison mode, report.
 - [example](example): an example module with deliberately weak tests,

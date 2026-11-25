@@ -43,6 +43,8 @@ type fileGen struct {
 	src      []byte
 	ops      map[Op]bool
 	next     *int
+	mcdc     bool
+	nextDec  *int
 
 	plan    map[ast.Node][]*site // a select can be both removed (SBR) and lose its default (SEL)
 	mutants []Mutant
@@ -51,20 +53,30 @@ type fileGen struct {
 	funcNames []string
 	funcTypes []*ast.FuncType
 	arid      int // > 0 while inside code that is not worth mutating
+
+	decisions  []Decision
+	inDecision map[ast.Node]bool // logical nodes below the root of a decision
+	conds      map[ast.Node]condRef
+	roots      map[ast.Node]int // decision root -> decision ID
 }
 
-func newFileGen(pkg *packages.Package, file *ast.File, src []byte, ops map[Op]bool, next *int) *fileGen {
+func newFileGen(pkg *packages.Package, file *ast.File, src []byte, opts Options, next, nextDec *int) *fileGen {
 	g := &fileGen{
-		pkg:      pkg,
-		info:     pkg.TypesInfo,
-		fset:     pkg.Fset,
-		file:     file,
-		filename: pkg.Fset.File(file.Pos()).Name(),
-		src:      src,
-		ops:      ops,
-		next:     next,
-		plan:     map[ast.Node][]*site{},
-		imports:  map[string]string{},
+		pkg:        pkg,
+		info:       pkg.TypesInfo,
+		fset:       pkg.Fset,
+		file:       file,
+		filename:   pkg.Fset.File(file.Pos()).Name(),
+		src:        src,
+		ops:        opts.Ops,
+		next:       next,
+		mcdc:       opts.MCDC,
+		nextDec:    nextDec,
+		plan:       map[ast.Node][]*site{},
+		imports:    map[string]string{},
+		inDecision: map[ast.Node]bool{},
+		conds:      map[ast.Node]condRef{},
+		roots:      map[ast.Node]int{},
 	}
 	for _, spec := range file.Imports {
 		pn := g.info.PkgNameOf(spec)
@@ -112,6 +124,9 @@ func (g *fileGen) collect() {
 		}
 		stack = append(stack, n)
 		aridMarks = append(aridMarks, arid)
+		if e, ok := n.(ast.Expr); ok {
+			g.planDecision(e)
+		}
 
 		switch n := n.(type) {
 		case *ast.FuncDecl:

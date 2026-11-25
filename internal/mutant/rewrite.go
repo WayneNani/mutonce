@@ -12,7 +12,9 @@ import (
 // rewrite turns the planned sites into schema code. Children are rewritten
 // before their parents, so nested mutation points end up inside the
 // original as well as inside every mutated variant of the enclosing site.
-func (g *fileGen) rewrite(excluded map[int]bool) bool {
+// MC/DC probes wrap a node after its mutation sites: a condition probe
+// records whatever the mutated condition yields.
+func (g *fileGen) rewrite(excluded, droppedDec map[int]bool) bool {
 	changed := false
 	astutil.Apply(g.file, nil, func(c *astutil.Cursor) bool {
 		orig := c.Node()
@@ -44,6 +46,14 @@ func (g *fileGen) rewrite(excluded map[int]bool) bool {
 			case RET:
 				retSchema(node.(*ast.FuncDecl), s, excluded)
 			}
+		}
+		if ref, ok := g.conds[orig]; ok && !droppedDec[ref.dec] {
+			node = condProbe(node.(ast.Expr), ref.k)
+			changed = true
+		}
+		if id, ok := g.roots[orig]; ok && !droppedDec[id] {
+			node = decisionProbe(node.(ast.Expr), id)
+			changed = true
 		}
 		if node != orig {
 			c.Replace(node)
