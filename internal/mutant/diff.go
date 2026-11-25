@@ -10,10 +10,32 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
-// Changes maps absolute file paths to the line ranges changed in them.
+// Changes maps canonical file paths to the line ranges changed in them.
 type Changes map[string][][2]int
+
+var canonicalCache sync.Map
+
+// canonical spells a path the same way whether it comes from git or from go
+// list: git resolves symbolic links (/var → /private/var on macOS) and
+// writes forward slashes and long names on Windows, where a temporary
+// directory may be spelled with short 8.3 names.
+func canonical(path string) string {
+	if c, ok := canonicalCache.Load(path); ok {
+		return c.(string)
+	}
+	c := filepath.Clean(filepath.FromSlash(path))
+	if abs, err := filepath.Abs(c); err == nil {
+		c = abs
+	}
+	if real, err := filepath.EvalSymlinks(c); err == nil {
+		c = real
+	}
+	canonicalCache.Store(path, c)
+	return c
+}
 
 // Lines counts the changed lines.
 func (c Changes) Lines() int {
@@ -34,7 +56,7 @@ func (c Changes) Lines() int {
 // mutant spans its whole function, so any change inside the function
 // selects it; expression mutants only match their own lines.
 func (c Changes) Touches(m Mutant) bool {
-	for _, r := range c[m.File] {
+	for _, r := range c[canonical(m.File)] {
 		if r[0] <= m.EndLine && r[1] >= m.Line {
 			return true
 		}
@@ -66,7 +88,7 @@ func ChangedLines(dir, ref string) (Changes, error) {
 		case strings.HasPrefix(line, "+++ "):
 			file = ""
 			if p, ok := strings.CutPrefix(line, "+++ b/"); ok && isSource(p) {
-				file = filepath.Join(root, p)
+				file = canonical(filepath.Join(root, p))
 			}
 		case strings.HasPrefix(line, "@@") && file != "":
 			m := hunk.FindStringSubmatch(line)
@@ -92,7 +114,7 @@ func ChangedLines(dir, ref string) (Changes, error) {
 	}
 	for _, p := range strings.Split(untracked, "\n") {
 		if isSource(p) {
-			changes[filepath.Join(root, p)] = [][2]int{{1, math.MaxInt}}
+			changes[canonical(filepath.Join(root, p))] = [][2]int{{1, math.MaxInt}}
 		}
 	}
 	return changes, nil

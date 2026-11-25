@@ -92,7 +92,10 @@ Bypassable checks (14 in 5 function(s))
 | macOS, FreeBSD, OpenBSD, NetBSD | own process group | resident memory watched, process group killed above the limit |
 | Windows | job object (kills the whole process tree) | hard, job memory limit |
 
-On other platforms only the timeout and the shared memory budget apply. CI runs
+On macOS and the BSDs a mutant that allocates memory that compresses well may
+reach its timeout before its resident memory crosses the limit; it is stopped
+either way. On other platforms only the timeout and the shared memory budget
+apply. CI runs
 the test suite on Linux, macOS and Windows.
 
 ## How it works
