@@ -41,8 +41,16 @@ func TestLocked(t *testing.T) {
 }
 
 func TestRepeat(t *testing.T) {
-	if got := Repeat("a", 3); len(got) != 3 {
-		t.Fatalf("Repeat = %v", got)
+	// Pseudo-random bytes: memory compression (macOS) must not slow down
+	// the growth of the mutant that repeats them forever.
+	v := make([]byte, 4096)
+	x := uint32(1)
+	for i := range v {
+		x = x*1664525 + 1013904223
+		v[i] = byte(x >> 24)
+	}
+	if got := Repeat(v, 3); len(got) != 3*len(v) || got[len(v)] != v[0] {
+		t.Fatalf("Repeat: %d bytes", len(got))
 	}
 }
 

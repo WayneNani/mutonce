@@ -90,13 +90,14 @@ type Buffer struct{}
 // an injected error can change it.
 func (Buffer) Close() error { return nil }
 
-// Repeat returns n copies of v. With its loop condition mutated to true it
-// appends forever; the memory limit has to stop that mutant before the
-// machine runs out of memory.
-func Repeat(v string, n int) []string {
-	var out []string
+// Repeat returns v repeated n times. With its loop condition mutated to true
+// it grows forever; the memory limit has to stop that mutant before the
+// machine runs out of memory. Bytes without pointers grow fast and cost the
+// garbage collector nothing, so the limit is reached long before the timeout.
+func Repeat(v []byte, n int) []byte {
+	var out []byte
 	for i := 1; i <= n; i++ {
-		out = append(out, v)
+		out = append(out, v...)
 	}
 	return out
 }

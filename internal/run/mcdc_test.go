@@ -212,16 +212,8 @@ func TestMCDCKeepsMutationResults(t *testing.T) {
 	if len(plain.Outcomes) != len(withMCDC.Outcomes) {
 		t.Fatalf("%d mutants without MC/DC, %d with", len(plain.Outcomes), len(withMCDC.Outcomes))
 	}
-	// A runaway mutant may be stopped by its memory limit or its timeout,
-	// whichever comes first; both are the same verdict here.
-	stopped := func(s Status) Status {
-		if s == Memory {
-			return Timeout
-		}
-		return s
-	}
 	for i, o := range plain.Outcomes {
-		if m := withMCDC.Outcomes[i]; m.ID != o.ID || stopped(m.Status) != stopped(o.Status) {
+		if m := withMCDC.Outcomes[i]; m.ID != o.ID || m.Status != o.Status {
 			t.Errorf("mutant #%d %s → %s: %s without MC/DC, %s with", o.ID, o.Original, o.Mutated, o.Status, m.Status)
 		}
 	}

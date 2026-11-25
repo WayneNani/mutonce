@@ -68,8 +68,7 @@ func TestExample(t *testing.T) {
 		{"Discount", "total >= 10000", "total > 10000", Survived},
 		// Removing the halving turns the loop into an endless one.
 		{"Batches", "n /= 2", "statement removed", Timeout},
-		// Appending forever must hit the memory limit, not the machine
-		// (or, where only resident memory is watched, possibly the timeout).
+		// Appending forever must hit the memory limit, not the machine.
 		{"Repeat", "i <= n", "true", Memory},
 		// Go-specific: a swallowed error and a select that blocks.
 		{"(*Store).Take", "return ErrInsufficient", "return nil", Killed},
@@ -81,14 +80,7 @@ func TestExample(t *testing.T) {
 		// Never called by any test.
 		{"Max", "func Max", "returns zero values", NotCovered},
 	} {
-		got := find(t, rep, tc.fn, tc.orig, tc.mutated)
-		if got.Status == Timeout && tc.want == Memory && runtime.GOOS != "linux" {
-			// Only Linux has a hard, deterministic limit. Elsewhere memory
-			// that compresses well (macOS) or slow runners can let the
-			// timeout win the race; both verdicts mean the mutant was stopped.
-			continue
-		}
-		if got.Status != tc.want {
+		if got := find(t, rep, tc.fn, tc.orig, tc.mutated); got.Status != tc.want {
 			t.Errorf("%s: %s → %s: %s, want %s", tc.fn, tc.orig, tc.mutated, got.Status, tc.want)
 		}
 	}
