@@ -2,6 +2,7 @@ package mutant
 
 import (
 	"go/ast"
+	"go/parser"
 	"go/token"
 	"slices"
 	"strconv"
@@ -15,6 +16,24 @@ import (
 // MC/DC probes wrap a node after its mutation sites: a condition probe
 // records whatever the mutated condition yields.
 func (g *fileGen) rewrite(excluded, droppedDec map[int]bool) bool {
+	// The variants of ROR, LCR and AOR get untouched copies of the operands.
+	// Reusing the rewritten operands would nest every inner schema into
+	// every variant, so a chain like a || b || … || z grew exponentially
+	// (3ⁿ copies for LCR, 2ⁿ for AOR). Inner mutants are switched off
+	// whenever a variant runs, so the copies behave the same.
+	pristine := map[*ast.BinaryExpr][2]ast.Expr{}
+	for n, sites := range g.plan {
+		be, ok := n.(*ast.BinaryExpr)
+		if !ok {
+			continue
+		}
+		for _, s := range sites {
+			if s.op == ROR || s.op == LCR || s.op == AOR {
+				pristine[be] = [2]ast.Expr{g.copyExpr(be.X), g.copyExpr(be.Y)}
+				break
+			}
+		}
+	}
 	changed := false
 	astutil.Apply(g.file, nil, func(c *astutil.Cursor) bool {
 		orig := c.Node()
@@ -29,9 +48,9 @@ func (g *fileGen) rewrite(excluded, droppedDec map[int]bool) bool {
 			changed = true
 			switch s.op {
 			case ROR, LCR:
-				node = boolSchema(node.(*ast.BinaryExpr), s, excluded)
+				node = boolSchema(node.(*ast.BinaryExpr), pristine[orig.(*ast.BinaryExpr)], s, excluded)
 			case AOR:
-				node = aorSchema(node.(*ast.BinaryExpr), s)
+				node = aorSchema(node.(*ast.BinaryExpr), pristine[orig.(*ast.BinaryExpr)], s)
 			case ERR:
 				// _moNoErr(id, err) yields nil while the mutant is active.
 				node = &ast.CallExpr{Fun: ast.NewIdent("_moNoErr"), Args: []ast.Expr{intLit(s.ids[0]), node.(ast.Expr)}}
@@ -61,6 +80,16 @@ func (g *fileGen) rewrite(excluded, droppedDec map[int]bool) bool {
 		return true
 	})
 	return changed
+}
+
+// copyExpr returns a fresh copy of e, parsed from its source text. It has no
+// positions, like every other node the rewrite creates.
+func (g *fileGen) copyExpr(e ast.Expr) ast.Expr {
+	c, err := parser.ParseExpr(g.text(e))
+	if err != nil {
+		return e // cannot happen for valid source; sharing is still correct
+	}
+	return c
 }
 
 func cmpBool(a, b bool) int {
@@ -98,8 +127,11 @@ func selSchema(sel *ast.SelectStmt, s *site) ast.Stmt {
 //
 // Go has no conditional expression, but for booleans this form needs no
 // closure: the original comes first, keeps its short-circuit evaluation,
-// and no variant is evaluated unless its mutant is active.
-func boolSchema(be *ast.BinaryExpr, s *site, excluded map[int]bool) ast.Expr {
+// and no variant is evaluated unless its mutant is active. The original
+// keeps the rewritten operands be.X and be.Y; the variants use the copies
+// in ops.
+func boolSchema(be *ast.BinaryExpr, ops [2]ast.Expr, s *site, excluded map[int]bool) ast.Expr {
+	x, y := ops[0], ops[1]
 	expr := ast.Expr(&ast.BinaryExpr{X: guard("_moOff", s.ids[0], len(s.ids)), Op: token.LAND, Y: paren(be)})
 	for i, v := range s.vars {
 		id := s.ids[i]
@@ -110,11 +142,11 @@ func boolSchema(be *ast.BinaryExpr, s *site, excluded map[int]bool) ast.Expr {
 		switch v {
 		case "true":
 		case "a":
-			term = and(term, paren(be.X))
+			term = and(term, paren(x))
 		case "b":
-			term = and(term, paren(be.Y))
+			term = and(term, paren(y))
 		default:
-			term = and(term, paren(&ast.BinaryExpr{X: be.X, Op: opTokens[v], Y: be.Y}))
+			term = and(term, paren(&ast.BinaryExpr{X: x, Op: opTokens[v], Y: y}))
 		}
 		expr = &ast.BinaryExpr{X: expr, Op: token.LOR, Y: paren(term)}
 	}
@@ -127,8 +159,8 @@ func boolSchema(be *ast.BinaryExpr, s *site, excluded map[int]bool) ast.Expr {
 //
 // For non-boolean values a closure is the only way to select a variant
 // without evaluating both of them.
-func aorSchema(be *ast.BinaryExpr, s *site) ast.Expr {
-	mut := &ast.BinaryExpr{X: be.X, Op: aorTable[be.Op], Y: be.Y}
+func aorSchema(be *ast.BinaryExpr, ops [2]ast.Expr, s *site) ast.Expr {
+	mut := &ast.BinaryExpr{X: ops[0], Op: aorTable[be.Op], Y: ops[1]}
 	return &ast.CallExpr{Fun: &ast.FuncLit{
 		Type: &ast.FuncType{
 			Params:  &ast.FieldList{},

@@ -1,6 +1,7 @@
 package mutant
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -160,5 +161,38 @@ func TestGenerateAll(t *testing.T) {
 	// `return 0, ErrEmpty` and `return 0, err`, but not `return sum, nil`.
 	if cats["ERR:Total"] != 1 || cats["ERR:Final"] != 1 || cats["SEL:TryNotify"] != 1 {
 		t.Errorf("Go-specific mutants: %v", cats)
+	}
+}
+
+// Long chains of && / || and + must not make the schema grow exponentially:
+// every variant once nested all inner schemas (3ⁿ copies for LCR).
+func TestGenerateLongChains(t *testing.T) {
+	dir := t.TempDir()
+	var conds, terms []string
+	for i := range 40 {
+		conds = append(conds, fmt.Sprintf("x == %d", i))
+		terms = append(terms, fmt.Sprintf("x*%d", i+1))
+	}
+	src := "package chain\n\nfunc Any(x int) bool { return " + strings.Join(conds, " || ") + " }\n\n" +
+		"func Sum(x int) int { return " + strings.Join(terms, " + ") + " }\n"
+	for name, data := range map[string]string{"go.mod": "module chain\n\ngo 1.24\n", "chain.go": src} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ops, _ := ParseOps("all")
+	res, err := Generate(dir, []string{"./..."}, Options{Ops: ops, MCDC: true}, t.Logf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	size := 0
+	for _, b := range res.Overlay {
+		size += len(b)
+	}
+	if size > 2<<20 {
+		t.Errorf("schema of %d KiB for two 40-term chains", size>>10)
+	}
+	if len(res.Mutants) < 200 {
+		t.Errorf("only %d mutants", len(res.Mutants))
 	}
 }

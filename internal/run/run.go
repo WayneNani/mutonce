@@ -707,9 +707,13 @@ func classify(out *Outcome, g group, run testRun) bool {
 	case run.timedOut:
 		out.Status, out.KilledBy = Timeout, g.bin.pkg.Path
 	case run.oom:
-		out.Status, out.KilledBy = Memory, g.bin.pkg.Path
+		out.Status, out.KilledBy, out.Detail = Memory, g.bin.pkg.Path, run.exit
 	case !run.passed:
-		out.Status, out.KilledBy = Killed, g.bin.pkg.Path+"."+killer(run.output)
+		k := killer(run.output)
+		out.Status, out.KilledBy = Killed, g.bin.pkg.Path+"."+k
+		if k == "(exit)" {
+			out.Detail = run.exit // no failing test and no crash message
+		}
 	default:
 		return false
 	}
@@ -727,7 +731,39 @@ func killer(output []byte) string {
 			return "(" + s + ")"
 		}
 	}
+	if signalCrash.Match(output) {
+		return "(signal)"
+	}
 	return "(exit)"
+}
+
+// signalCrash matches the runtime's report of a fatal signal outside Go
+// code, e.g. "SIGSEGV: segmentation violation".
+var signalCrash = regexp.MustCompile(`(?m)^SIG[A-Z]+: `)
+
+// runtimeFault reports whether the process died from a fatal signal inside
+// the Go runtime itself, without a failing test. The runtime does not always
+// fail cleanly when its memory limit is reached: Go 1.27's garbage collector
+// can crash with SIGSEGV instead of reporting "out of memory". A mutant
+// cannot otherwise make the runtime fault (short of unsafe code), so this
+// counts as exceeding the memory limit.
+func runtimeFault(exitCode int, output []byte) bool {
+	if exitCode != 2 || failLine.Match(output) {
+		return false
+	}
+	loc := signalCrash.FindIndex(output)
+	if loc == nil {
+		return false
+	}
+	// The first frame follows the first goroutine header after the signal.
+	rest := output[loc[1]:]
+	i := bytes.Index(rest, []byte("\ngoroutine "))
+	if i < 0 {
+		return false
+	}
+	rest = rest[i+1:]
+	j := bytes.IndexByte(rest, '\n')
+	return j >= 0 && bytes.HasPrefix(rest[j+1:], []byte("runtime."))
 }
 
 type testRun struct {
@@ -737,6 +773,7 @@ type testRun struct {
 	dur      time.Duration
 	maxRSS   int64
 	output   []byte
+	exit     string // how a failed process ended, e.g. "exit status 2"
 	err      error
 }
 
@@ -782,8 +819,13 @@ func runTests(b *binary, dir string, names []string, env []string, timeout time.
 		run.passed = true
 	case !errors.As(err, &exit):
 		run.err = err
-	case outOfMemory.Match(run.output):
+	case outOfMemory.Match(run.output), killedByOS(exit):
 		run.oom = true
+	case runtimeFault(exit.ExitCode(), run.output):
+		run.oom = true
+		run.exit = "the Go runtime crashed, most likely out of memory"
+	default:
+		run.exit = exit.Error()
 	}
 	return run
 }

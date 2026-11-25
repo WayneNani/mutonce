@@ -81,7 +81,7 @@ func TestExample(t *testing.T) {
 		{"Max", "func Max", "returns zero values", NotCovered},
 	} {
 		if got := find(t, rep, tc.fn, tc.orig, tc.mutated); got.Status != tc.want {
-			t.Errorf("%s: %s → %s: %s, want %s", tc.fn, tc.orig, tc.mutated, got.Status, tc.want)
+			t.Errorf("%s: %s → %s: %s (by %s, %s), want %s", tc.fn, tc.orig, tc.mutated, got.Status, got.KilledBy, got.Detail, tc.want)
 		}
 	}
 	if len(rep.Excluded) == 0 {
@@ -261,5 +261,31 @@ func TestSchemaMatchesNaive(t *testing.T) {
 	}
 	if compared != sample {
 		t.Errorf("compared %d mutants, want %d", compared, sample)
+	}
+}
+
+func TestRuntimeFault(t *testing.T) {
+	// Shortened from Go 1.27 at its memory limit.
+	gcCrash := "SIGSEGV: segmentation violation\nPC=0x43231c m=8 sigcode=1 addr=0x0\n\n" +
+		"goroutine 0 gp=0x1a23a3184960 m=8 mp=0x1a23a3181008 [idle]:\n" +
+		"runtime.(*spanQueue).tryDrain(0x400?, 0x70cd88?, 0xa3241800?)\n\t/go/src/runtime/mgcmark_greenteagc.go:520 +0x5c\n"
+	userCrash := "SIGSEGV: segmentation violation\nPC=0x4a1b2c m=0 sigcode=1 addr=0x8\n\n" +
+		"goroutine 18 gp=0xc000102380 m=0 mp=0x7a5b20 [running]:\n" +
+		"example.com/shop/tricky.Positive(0x0)\n\t/src/tricky/tricky.go:39 +0x1c\n"
+	for _, tc := range []struct {
+		name   string
+		code   int
+		output string
+		want   bool
+	}{
+		{"gc crash", 2, gcCrash, true},
+		{"crash in user code", 2, userCrash, false},
+		{"failing test", 2, "--- FAIL: TestX (0.00s)\n" + gcCrash, false},
+		{"ordinary failure", 1, gcCrash, false},
+		{"panic", 2, "panic: boom\n\ngoroutine 1 [running]:\nruntime.gopanic()\n", false},
+	} {
+		if got := runtimeFault(tc.code, []byte(tc.output)); got != tc.want {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }

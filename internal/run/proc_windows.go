@@ -94,3 +94,7 @@ func memAvailable() (int64, error) {
 	}
 	return int64(m.AvailPhys), nil
 }
+
+// killedByOS: Windows has no OOM killer; a job beyond its limit fails to
+// allocate instead.
+func killedByOS(*exec.ExitError) bool { return false }
