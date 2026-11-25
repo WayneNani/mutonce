@@ -28,12 +28,12 @@ func (rep *Report) Print(w io.Writer, verbose bool) {
 		fmt.Fprintf(w, "Diff:      %d changed line(s) in %d file(s) since %s, %d mutants outside skipped\n",
 			rep.DiffLines, rep.DiffFiles, rep.Diff, rep.Unselected)
 	}
-	mutation := len(rep.Outcomes)+len(rep.Excluded) > 0 || rep.MCDC == nil
+	mutation := len(rep.Outcomes)+len(rep.Excluded) > 0 || rep.MCDCTotal == nil
 	if mutation {
 		fmt.Fprintf(w, "Mutants:   %d in the schema, %d dropped by the type check (%d round(s))\n",
 			len(rep.Outcomes)+rep.Covered-rep.Executed, len(rep.Excluded), rep.Rounds)
 	}
-	if len(rep.Outcomes) == 0 && rep.MCDC == nil {
+	if len(rep.Outcomes) == 0 && rep.MCDCTotal == nil {
 		fmt.Fprintln(w, "\nNo mutants to check.")
 		return
 	}

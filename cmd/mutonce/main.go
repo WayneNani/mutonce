@@ -22,6 +22,7 @@ func main() {
 	mode := flag.String("mode", "schema", "schema, or naive (for comparison: one build per mutant)")
 	ops := flag.String("ops", "all", "operators, comma-separated: ROR,LCR,AOR,SBR,RET,ERR,SEL; none for MC/DC alone")
 	mcdc := flag.Bool("mcdc", false, "also measure MC/DC coverage of the mutated packages")
+	mcdcMin := flag.Float64("mcdc-min", 0, "exit with code 3 if MC/DC is below this percentage; implies -mcdc")
 	workers := flag.Int("j", runtime.NumCPU(), "parallel test processes")
 	factor := flag.Float64("timeout-factor", 5, "timeout = factor × runtime of the tests without mutation + 2s")
 	recheck := flag.Bool("recheck", false, "run every mutant twice and mark changing verdicts as flaky")
@@ -47,6 +48,12 @@ func main() {
 	opSet, err := mutant.ParseOps(*ops)
 	if err != nil {
 		fail(err)
+	}
+	if *mcdcMin < 0 || *mcdcMin > 100 {
+		fail(fmt.Errorf("-mcdc-min must be between 0 and 100"))
+	}
+	if *mcdcMin > 0 {
+		*mcdc = true
 	}
 	if len(opSet) == 0 && !*mcdc {
 		fail(fmt.Errorf("-ops none leaves nothing to do without -mcdc"))
@@ -94,6 +101,10 @@ func main() {
 		if err := rep.WriteJSON(*jsonOut); err != nil {
 			fail(err)
 		}
+	}
+	if *mcdcMin > 0 && rep.MCDCBelow(*mcdcMin) {
+		fmt.Fprintf(os.Stderr, "mutonce: MC/DC of %.1f %% is below the minimum of %g %%\n", rep.MCDCTotal.Percent, *mcdcMin)
+		os.Exit(3)
 	}
 }
 

@@ -45,8 +45,18 @@ type Decision struct {
 	Func    string `json:"func,omitempty"`
 	Expr    string `json:"expr"`
 	Conds   []Cond `json:"conditions"`
-	tree    *condNode
+	// Reason says why a decision is not measured; empty for measured ones.
+	Reason string `json:"reason,omitempty"`
+	tree   *condNode
 }
+
+// Reasons for leaving a decision out of the measurement.
+const (
+	SkipNamedBool  = "named bool type"
+	SkipRecover    = "calls recover"
+	SkipManyConds  = "more than 32 conditions"
+	SkipTypeErrors = "probe does not compile"
+)
 
 // condNode is the logical structure of a decision. Op is token.LAND,
 // token.LOR or token.NOT; a leaf (Op == token.ILLEGAL) is condition cond,
@@ -91,6 +101,8 @@ func isLogical(e ast.Expr) bool {
 // logical expression with at least two conditions. Nested logical nodes are
 // marked, so only the outermost one starts a decision; the conditions are
 // visited later and may hold decisions of their own, e.g. f(a && b) || c.
+// A decision that cannot be instrumented is registered with its reason, so
+// the report can tell that it was not measured.
 func (g *fileGen) planDecision(e ast.Expr) {
 	if !g.mcdc || g.inDecision[e] || !isLogical(e) {
 		return
@@ -125,12 +137,9 @@ func (g *fileGen) planDecision(e ast.Expr) {
 		return &condNode{op: token.ILLEGAL, cond: len(leaves) - 1}
 	}
 	tree := build(e)
-	if g.arid > 0 || len(leaves) < 2 || len(leaves) > maxConds || g.callsRecover(e) {
-		return
-	}
 	tv, ok := g.info.Types[e]
-	if !ok || tv.Value != nil || !isPlainBool(tv.Type) {
-		return
+	if len(leaves) < 2 || !ok || tv.Value != nil {
+		return // no decision, or one that cannot change
 	}
 	id := *g.nextDec
 	*g.nextDec++
@@ -139,12 +148,23 @@ func (g *fileGen) planDecision(e ast.Expr) {
 		ID: id, Pkg: g.pkg.PkgPath, File: pos.Filename, Line: pos.Line, Col: pos.Column, EndLine: end.Line,
 		Func: g.currentFunc(), Expr: g.snippet(e), tree: tree,
 	}
-	for k, l := range leaves {
+	for _, l := range leaves {
 		p := g.fset.Position(l.Pos())
 		d.Conds = append(d.Conds, Cond{Text: g.snippet(l), Line: p.Line, Col: p.Column})
-		g.conds[l] = condRef{id, k}
 	}
-	g.roots[e] = id
+	switch {
+	case !isPlainBool(tv.Type):
+		d.Reason = SkipNamedBool // the probe closure returns plain bool
+	case len(leaves) > maxConds:
+		d.Reason = SkipManyConds
+	case g.callsRecover(e):
+		d.Reason = SkipRecover
+	default:
+		for k, l := range leaves {
+			g.conds[l] = condRef{id, k}
+		}
+		g.roots[e] = id
+	}
 	g.decisions = append(g.decisions, d)
 }
 

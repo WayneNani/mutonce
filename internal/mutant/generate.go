@@ -42,10 +42,10 @@ type Options struct {
 type Result struct {
 	Mutants  []Mutant
 	Excluded []Mutant // dropped because the schema would not compile
-	// Decisions are instrumented for MC/DC; ExcludedDecisions counts those
-	// whose probes would not compile.
-	Decisions         []Decision
-	ExcludedDecisions int
+	// Decisions are instrumented for MC/DC; SkippedDecisions could not be,
+	// each with its Reason.
+	Decisions        []Decision
+	SkippedDecisions []Decision
 	// Unselected counts the mutants left out by the selection (diff mode).
 	Unselected int
 	Overlay    map[string][]byte
@@ -156,8 +156,11 @@ func generate(pkgs []*packages.Package, opts Options, excluded, excludedDec map[
 				switch {
 				case selected != nil && !selected(Mutant{File: d.File, Line: d.Line, EndLine: d.EndLine}):
 					dropDec[d.ID] = true
+				case d.Reason != "":
+					res.SkippedDecisions = append(res.SkippedDecisions, d)
 				case excludedDec[d.ID]:
-					res.ExcludedDecisions++
+					d.Reason = SkipTypeErrors
+					res.SkippedDecisions = append(res.SkippedDecisions, d)
 				default:
 					res.Decisions = append(res.Decisions, d)
 				}

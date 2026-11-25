@@ -1,6 +1,8 @@
 package run
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -131,9 +133,15 @@ func TestMCDCEdgeCases(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a module")
 	}
+	// Many has more conditions than a vector holds.
+	var many []string
+	for i := range 33 {
+		many = append(many, fmt.Sprintf("x == %d", i))
+	}
 	dir := writeModule(t, map[string]string{
 		"go.mod":       "module edge\n\ngo 1.24\n",
 		"edge.go":      edgeSrc,
+		"many.go":      "package edge\n\nfunc Many(x int) bool { return " + strings.Join(many, " || ") + " }\n",
 		"edge_test.go": edgeTest,
 	})
 	for _, opsArg := range []string{"none", "all"} {
@@ -146,8 +154,48 @@ func TestMCDCEdgeCases(t *testing.T) {
 			if len(rep.BaselineFailures) > 0 {
 				t.Fatalf("the probes change behaviour: %v", rep.BaselineFailures)
 			}
-			if rep.MCDCExcluded > 0 {
-				t.Errorf("%d decisions dropped by the type check", rep.MCDCExcluded)
+			// Decisions that cannot be measured are reported with the reason.
+			reasons := map[string]string{}
+			for _, d := range rep.MCDCSkipped {
+				reasons[d.Func] = d.Reason
+			}
+			want := map[string]string{
+				"Recovered.func": mutant.SkipRecover,
+				"Named":          mutant.SkipNamedBool,
+				"Many":           mutant.SkipManyConds,
+			}
+			if fmt.Sprint(reasons) != fmt.Sprint(want) {
+				t.Errorf("skipped decisions: %v, want %v", reasons, want)
+			}
+			total := rep.MCDCTotal
+			if total == nil || total.NotMeasured != 3 || total.Decisions != len(rep.MCDC)+3 {
+				t.Fatalf("summary: %+v with %d measured decisions", total, len(rep.MCDC))
+			}
+			// The 2 + 2 + 33 conditions of the skipped decisions count as not covered.
+			measured := 0
+			for _, d := range rep.MCDC {
+				measured += len(d.Conditions)
+			}
+			if total.Conditions != measured+37 || total.Percent >= 100 {
+				t.Errorf("summary: %+v, %d measured conditions", total, measured)
+			}
+			if !rep.MCDCBelow(100) || rep.MCDCBelow(total.Percent) {
+				t.Errorf("MCDCBelow is off for %.2f %%", total.Percent)
+			}
+			if len(rep.MCDCPackages) != 1 || rep.MCDCPackages[0].Pkg != "edge" || rep.MCDCPackages[0].Covered != total.Covered {
+				t.Errorf("package summary: %+v", rep.MCDCPackages)
+			}
+			var out strings.Builder
+			rep.Print(&out, false)
+			if !strings.Contains(out.String(), "left out: "+mutant.SkipNamedBool) || !strings.Contains(out.String(), "3 not measured") {
+				t.Errorf("report lacks the skipped decisions:\n%s", out.String())
+			}
+			data, err := json.Marshal(rep)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), `"reason":"calls recover"`) || !strings.Contains(string(data), `"mcdcTotal":{`) {
+				t.Errorf("JSON lacks reasons or summary")
 			}
 			for _, o := range rep.Outcomes {
 				if o.Status == Error {
@@ -214,7 +262,7 @@ func TestMCDCKeepsMutationResults(t *testing.T) {
 	}
 	for i, o := range plain.Outcomes {
 		if m := withMCDC.Outcomes[i]; m.ID != o.ID || m.Status != o.Status {
-			t.Errorf("mutant #%d %s → %s: %s without MC/DC, %s with", o.ID, o.Original, o.Mutated, o.Status, m.Status)
+			t.Errorf("mutant #%d %s → %s: %s without MC/DC, %s with (by %s, %s)", o.ID, o.Original, o.Mutated, o.Status, m.Status, m.KilledBy, m.Detail)
 		}
 	}
 	var free *mutant.DecisionResult

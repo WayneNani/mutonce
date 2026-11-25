@@ -100,7 +100,9 @@ type Report struct {
 	Unselected       int                     `json:"unselected,omitempty"`
 	SideEffects      []string                `json:"sideEffects,omitempty"` // files test runs left behind (removed again)
 	MCDC             []mutant.DecisionResult `json:"mcdc,omitempty"`
-	MCDCExcluded     int                     `json:"mcdcExcluded,omitempty"` // decisions whose probes did not compile
+	MCDCSkipped      []mutant.Decision       `json:"mcdcSkipped,omitempty"` // not measured, with reason
+	MCDCPackages     []MCDCSummary           `json:"mcdcPackages,omitempty"`
+	MCDCTotal        *MCDCSummary            `json:"mcdcTotal,omitempty"`
 	WorkDir          string                  `json:"workDir,omitempty"`
 }
 
@@ -190,10 +192,11 @@ func Run(cfg Config) (*Report, error) {
 	}
 	phase("Schema + type check", t)
 	rep.Excluded, rep.Rounds, rep.Unselected = res.Excluded, res.Rounds, res.Unselected
-	rep.MCDCExcluded = res.ExcludedDecisions
+	rep.MCDCSkipped = res.SkippedDecisions
 	logf("%d mutants in the schema, %d dropped", len(res.Mutants), len(res.Excluded))
 	if cfg.MCDC {
-		logf("%d decisions instrumented for MC/DC, %d dropped", len(res.Decisions), res.ExcludedDecisions)
+		logf("%d decisions instrumented for MC/DC, %d not measured", len(res.Decisions), len(res.SkippedDecisions))
+		defer rep.summarizeMCDC()
 	}
 	if len(res.Mutants) == 0 && len(res.Decisions) == 0 {
 		rep.Phases = append(rep.Phases, Phase{"Total", time.Since(start)})

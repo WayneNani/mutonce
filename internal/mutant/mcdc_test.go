@@ -139,11 +139,12 @@ func TestGenerateDecisions(t *testing.T) {
 			}
 		}
 	}
-	// Both combines a named bool type, which the probes cannot return.
+	// Both combines a named bool type, which the probes cannot return: it
+	// is reported as not measured instead.
 	if _, ok := got["Both"]; ok {
 		t.Errorf("decision of a named bool type instrumented")
 	}
-	if res.ExcludedDecisions != 0 {
-		t.Errorf("%d decisions dropped by the type check", res.ExcludedDecisions)
+	if len(res.SkippedDecisions) != 1 || res.SkippedDecisions[0].Func != "Both" || res.SkippedDecisions[0].Reason != SkipNamedBool {
+		t.Errorf("skipped decisions: %+v", res.SkippedDecisions)
 	}
 }

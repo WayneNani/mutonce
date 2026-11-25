@@ -43,6 +43,7 @@ mutonce -tests ./... ./internal/server   # mutate one package, use all tests
 mutonce -json report.json -v  # full details
 mutonce -mcdc                 # mutation testing plus MC/DC coverage
 mutonce -mcdc -ops none       # MC/DC coverage only, in seconds
+mutonce -ops none -mcdc-min 100 ./internal/billing   # CI gate: exit code 3 below 100 %
 ```
 
 A shortened report for the [example module](example) in this repository:
@@ -74,6 +75,7 @@ Bypassable checks (14 in 5 function(s))
 | `-tests <patterns>` | packages whose tests run, independent of the mutated packages (default: the mutated packages) |
 | `-ops ROR,LCR,AOR,SBR,RET,ERR,SEL` | operators to use (default: all); `none` together with `-mcdc` measures MC/DC only |
 | `-mcdc` | also measure MC/DC coverage of the mutated packages (see [MC/DC coverage](#mcdc-coverage)) |
+| `-mcdc-min P` | exit with code 3 if MC/DC is below P percent; implies `-mcdc` |
 | `-recheck` | run every mutant twice; changing verdicts are reported as flaky and excluded from the score |
 | `-j N` | parallel test processes (default: number of CPUs) |
 | `-timeout-factor F` | timeout = F × runtime of the tests without mutation + 2 s (default 5) |
@@ -122,7 +124,8 @@ the test suite on Linux, macOS and Windows.
 6. **Memory limit.** The counterpart of the timeout: a mutant may use at most
    four times the peak memory of its tests without mutation (at least
    512 MiB), and every process reserves its limit from a shared budget (default:
-   half the available memory) before it starts. Exceeding it counts as
+   half the available memory, on Linux within the cgroup limit of a container,
+   CI job or systemd scope) before it starts. Exceeding it counts as
    detected. This is not optional — a mutant that removes a loop's exit
    condition allocates gigabytes within seconds, and the kernel's OOM killer
    may then take down whatever shares the session with the test process.
@@ -208,17 +211,43 @@ to affect the outcome on its own: two evaluations in which only that condition
 changes, and the outcome changes with it.
 
 ```text
-MC/DC: 4 of 6 conditions (66.7 %) in 3 decisions
+MC/DC: 4 of 8 conditions (50.0 %) in 4 decisions, 1 not measured
+                   Package  Decisions  Never evaluated  Not measured  Conditions  Independent   MC/DC
+  example.com/shop/pricing          1                0             0           2            0   0.0 %
+   example.com/shop/tricky          3                0             1           6            4  66.7 %
 
 Conditions without a shown independent effect (1 decision(s))
   No pair of test runs changes only this condition and with it the outcome.
   pricing/pricing.go:53  FreeShipping  premium || total > 2500
     premium       both values seen  missing: premium = false, total > 2500 = false → false
     total > 2500  only true seen    missing: premium = false, total > 2500 = false → false
+
+Decisions not measured (1)
+  Their conditions count as not covered.
+  tricky/tricky.go:43  Both  a && b  left out: named bool type
 ```
 
 Here the tests only ever ask for free shipping; a single test with a small,
 non-premium order would cover both conditions.
+
+**Decisions that cannot be measured** are listed with the reason, and their
+conditions count as not covered, so 100 % means that every decision was
+measured *and* covered. The reasons are `named bool type` (the probe closure
+returns a plain `bool`), `calls recover` (a closure would stop `recover` from
+working), `more than 32 conditions`, and `probe does not compile` (not observed
+so far). Rewriting such a decision with plain `bool` operands, or as nested
+`if` statements, makes it measurable.
+
+**For CI**, `-mcdc-min P` makes mutonce exit with code 3 when MC/DC is below
+P percent, after the report has been written. The JSON report (`-json`) holds
+the same numbers in `mcdcTotal` and per package in `mcdcPackages`
+(`decisions`, `notMeasured`, `neverEvaluated`, `conditions`, `covered`,
+`percent`), the decisions with their conditions and suggestions in `mcdc`, and
+the unmeasured ones with their `reason` in `mcdcSkipped`. Run mutonce once per
+package pattern to apply different thresholds to different packages.
+
+Exit codes: 0 when the run completed, 1 on errors, 3 when MC/DC is below
+`-mcdc-min`. Surviving mutants do not change the exit code.
 
 **How it is measured.** The decisions are instrumented in the same schema as
 the mutants, and the vectors are recorded in the per-test coverage run that
@@ -238,8 +267,8 @@ A vector per evaluation keeps recursion and goroutines apart. Go evaluates
 `&&` and `||` with short circuit, so a condition that was not evaluated matches
 either value when looking for a pair ("unique cause with short circuit", as in
 the MC/DC modes of GCC and LLVM). Only passing tests count. Constant operands
-(`debug && …`) are not conditions; decisions of a named boolean type and those
-calling `recover` are left out, because a closure would change their meaning.
+(`debug && …`) are not conditions, and a decision that is constant as a whole
+is none.
 
 **MC/DC or mutation score?** They overlap: the ROR and LCR mutants of a
 decision can only be killed by tests that separate its conditions, so a good
@@ -337,9 +366,9 @@ What the runs found, and what the tests written in response showed:
   measure it.
 - **cgo packages** and generated files are skipped; function literals get no
   RET mutants.
-- **MC/DC** covers boolean expressions of the mutated, non-generated files only.
-  Decisions with more than 32 conditions are skipped; for more than 12, no
-  missing test case is proposed. Like the switches, the probe closures cost a
+- **MC/DC** covers boolean expressions of the mutated, non-generated files only;
+  cgo packages are not instrumented and do not appear in the report. For
+  decisions with more than 12 conditions, no missing test case is proposed. Like the switches, the probe closures cost a
   little speed (about 0.3 ms per mutant on `astutil`), so `-mcdc` is off by
   default.
 - **Equivalent mutants** remain apart from the simple cases above. They are
